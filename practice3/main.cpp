@@ -171,6 +171,13 @@ vec2 bezier(std::vector<vertex> const & vertices, float t)
 }
 
 void update_bezier(const std::vector<vertex>& vertices, int quality, GLuint bezier_vertex_buffer, std::vector<bezier_vertex>* bezier_vertices) {
+    if (vertices.empty()) {
+        bezier_vertices->clear();
+        glBindBuffer(GL_ARRAY_BUFFER, bezier_vertex_buffer);
+        glBufferData(GL_ARRAY_BUFFER, 0, bezier_vertices->data(), GL_DYNAMIC_DRAW);
+        return;
+    }
+
     bezier_vertices->resize(1 + vertices.size() * quality);
     for (int i = 0; i <= vertices.size() * quality; i++) {
         (*bezier_vertices)[i] = bezier_vertex{

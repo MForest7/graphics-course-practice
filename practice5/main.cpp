@@ -38,30 +38,37 @@ R"(#version 330 core
 
 uniform mat4 transform;
 uniform mat4 projection;
+uniform float time;
 
 layout (location = 0) in vec3 in_position;
 layout (location = 1) in vec3 in_normal;
+layout (location = 2) in vec2 in_texcoord;
 
 out vec3 normal;
+out vec2 texcoord;
 
 void main()
 {
     gl_Position = projection * transform * vec4(in_position, 1.0);
     normal = mat3(transform) * in_normal;
+    texcoord = in_texcoord + 0.1f * vec2(time, time);
 }
 )";
 
 const char fragment_shader_source[] =
 R"(#version 330 core
 
+uniform sampler2D sampler;
+
 in vec3 normal;
+in vec2 texcoord;
 
 layout (location = 0) out vec4 out_color;
 
 void main()
 {
     float lightness = 0.5 + 0.5 * dot(normalize(normal), normalize(vec3(1.0, 2.0, 3.0)));
-    vec3 albedo = vec3(1.0);
+    vec3 albedo = texture(sampler, texcoord).xyz;
     out_color = vec4(lightness * albedo, 1.0);
 }
 )";
@@ -156,6 +163,74 @@ int main() try
     std::string cow_texture_path = project_root + "/cow.png";
     obj_data cow = parse_obj(project_root + "/cow.obj");
 
+    GLuint vao;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    GLuint ebo;
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(int) * cow.indices.size(), cow.indices.data(), GL_STATIC_DRAW);
+
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(obj_data::vertex) * cow.vertices.size(), cow.vertices.data(), GL_STATIC_DRAW);
+
+    // position
+    glEnableVertexArrayAttrib(vao, 0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, false, sizeof(obj_data::vertex), (void*)offsetof(obj_data::vertex, position));
+
+    // normal
+    glEnableVertexArrayAttrib(vao, 1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, false, sizeof(obj_data::vertex), (void*)offsetof(obj_data::vertex, normal));
+
+    // texcoord
+    glEnableVertexArrayAttrib(vao, 2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, false, sizeof(obj_data::vertex), (void*)offsetof(obj_data::vertex, texcoord));
+
+    GLuint chess_texture;
+    glGenTextures(1, &chess_texture);
+    glBindTexture(GL_TEXTURE_2D, chess_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+
+    size_t chess_texture_size = 1024;
+    std::vector<std::uint32_t> pixels(chess_texture_size * chess_texture_size);
+    for (size_t i = 0; i < pixels.size(); i++)
+        pixels[i] = ((i % chess_texture_size + i / chess_texture_size) % 2) ? 0xFF000000u : 0xFFFFFFFFu;
+    
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, chess_texture_size, chess_texture_size, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    std::uint32_t level_fill_color[4] = { 0, 0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u };
+
+    for (int level = 1; level <= 3; level++) {
+        size_t level_size = chess_texture_size >> level;
+        std::vector<std::uint32_t> mipmap(level_size * level_size, level_fill_color[level]);
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, level_size, level_size, 0, GL_RGBA, GL_UNSIGNED_BYTE, mipmap.data());
+    }
+
+
+    GLuint cow_texture;
+    glGenTextures(1, &cow_texture);
+    glBindTexture(GL_TEXTURE_2D, cow_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+
+    int cow_texture_width, cow_texture_height, channels;
+    unsigned char* cow_texture_raw_data = stbi_load(cow_texture_path.c_str(), &cow_texture_width, &cow_texture_height, &channels, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cow_texture_width, cow_texture_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, cow_texture_raw_data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    glActiveTexture(GL_TEXTURE1);
+
+    GLuint sampler = glGetUniformLocation(program, "sampler");
+    glUniform1i(sampler, 1);
+
+    GLuint time_location = glGetUniformLocation(program, "time");
+
     auto last_frame_start = std::chrono::high_resolution_clock::now();
 
     float time = 0.f;
@@ -230,6 +305,8 @@ int main() try
         glUseProgram(program);
         glUniformMatrix4fv(transform_location, 1, GL_TRUE, transform);
         glUniformMatrix4fv(projection_location, 1, GL_TRUE, projection);
+        glUniform1f(time_location, time);
+        glDrawElements(GL_TRIANGLES, cow.indices.size(), GL_UNSIGNED_INT, 0);
 
         SDL_GL_SwapWindow(window);
     }

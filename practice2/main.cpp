@@ -10,8 +10,8 @@
 #include <string_view>
 #include <stdexcept>
 #include <iostream>
+#include <map>
 #include <chrono>
-#include <unordered_map>
 
 std::string to_string(std::string_view str)
 {
@@ -31,24 +31,37 @@ void glew_fail(std::string_view message, GLenum error)
 const char vertex_shader_source[] =
 R"(#version 330 core
 
-const vec2 VERTICES[3] = vec2[3](
-    vec2(0.0, 1.0),
-    vec2(-sqrt(0.75), -0.5),
-    vec2( sqrt(0.75), -0.5)
+const vec2 VERTICES[8] = vec2[8](
+    vec2(0.0, 0.0),
+    vec2(-1.0, 0.0),
+    vec2(-0.5, -sqrt(0.75)),
+    vec2(0.5, -sqrt(0.75)),
+    vec2(1.0, 0.0),
+    vec2(0.5, sqrt(0.75)),
+    vec2(-0.5, sqrt(0.75)),
+    vec2(-1.0, 0.0)
 );
 
-const vec3 COLORS[3] = vec3[3](
+const vec3 COLORS[8] = vec3[8](
+    vec3(0.5, 0.5, 0.5),
     vec3(1.0, 0.0, 0.0),
     vec3(0.0, 1.0, 0.0),
-    vec3(0.0, 0.0, 1.0)
+    vec3(0.0, 0.0, 1.0),
+    vec3(0.0, 1.0, 1.0),
+    vec3(1.0, 0.0, 1.0),
+    vec3(1.0, 1.0, 0.0),
+    vec3(1.0, 0.0, 0.0)
 );
 
 out vec3 color;
 
+uniform mat4 transform;
+uniform mat4 view;
+
 void main()
 {
     vec2 position = VERTICES[gl_VertexID];
-    gl_Position = vec4(position, 0.0, 1.0);
+    gl_Position = view * transform * vec4(position, 0.0, 1.0);
     color = COLORS[gl_VertexID];
 }
 )";
@@ -65,6 +78,11 @@ void main()
     out_color = vec4(color, 1.0);
 }
 )";
+
+const char uniform_scale[] = "scale";
+const char uniform_angle[] = "angle";
+const char uniform_transform[] = "transform";
+const char uniform_view[] = "view";
 
 GLuint create_shader(GLenum type, const char * source)
 {
@@ -133,6 +151,7 @@ int main() try
 
     if (auto result = glewInit(); result != GLEW_NO_ERROR)
         glew_fail("glewInit: ", result);
+    //SDL_GL_SetSwapInterval(0);
 
     if (!GLEW_VERSION_3_3)
         throw std::runtime_error("OpenGL 3.3 is not supported");
@@ -147,13 +166,30 @@ int main() try
     GLuint vao;
     glGenVertexArrays(1, &vao);
 
-    std::unordered_map<SDL_Scancode, bool> key_down;
+    glUseProgram(program);
+    float scale = 0.5f;
+    float time = 0.0f;
+    
+    int transform_location = glGetUniformLocation(program, uniform_transform);
+    int view_location = glGetUniformLocation(program, uniform_view);
 
     auto last_frame_start = std::chrono::high_resolution_clock::now();
+
+    float x = 0;
+    float y = 0;
+    float angle = 0;
+    float direction = 0;
+    float angle_direction = 0;
 
     bool running = true;
     while (running)
     {
+        auto now = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration_cast<std::chrono::duration<float>>(now - last_frame_start).count();
+        std::cout << "duration: " << dt << " s" << std::endl;
+        last_frame_start = now;
+        time += dt;
+
         for (SDL_Event event; SDL_PollEvent(&event);) switch (event.type)
         {
         case SDL_QUIT:
@@ -168,26 +204,69 @@ int main() try
                 break;
             }
             break;
-        case SDL_KEYDOWN:
-            key_down[event.key.keysym.scancode] = true;
+        case SDL_KEYDOWN: switch (event.key.keysym.scancode) 
+            {
+            case SDL_SCANCODE_UP:
+                direction = 1;
+                break;
+            case SDL_SCANCODE_DOWN:
+                direction = -1;
+                break;
+            case SDL_SCANCODE_LEFT:
+                angle_direction = 1;
+                break;
+            case SDL_SCANCODE_RIGHT:
+                angle_direction = -1;
+                break;
+            }
             break;
-        case SDL_KEYUP:
-            key_down[event.key.keysym.scancode] = false;
+        case SDL_KEYUP: switch (event.key.keysym.scancode) 
+            {
+            case SDL_SCANCODE_UP:
+            case SDL_SCANCODE_DOWN:
+                direction = 0;
+                break;
+            case SDL_SCANCODE_LEFT:
+            case SDL_SCANCODE_RIGHT:
+                angle_direction = 0;
+                break;
+            }
             break;
         }
+
+        x += direction * dt * cos(angle);
+        y += direction * dt * sin(angle);
+
+        angle += angle_direction * dt;
 
         if (!running)
             break;
 
-        auto now = std::chrono::high_resolution_clock::now();
-        float dt = std::chrono::duration_cast<std::chrono::duration<float>>(now - last_frame_start).count();
-        last_frame_start = now;
+        float transform[16] =
+        {
+            scale * cos(angle), scale * (- sin(angle)), 0, x, // 1 строка
+            scale * sin(angle), scale * cos(angle), 0, y, // 2 строка
+            0, 0, 0, 0, // 3 строка
+            0, 0, 0, 1, // 4 строка
+        };
+        glUniformMatrix4fv(transform_location, 1, GL_TRUE, transform);
+
+        float aspect_ratio = (float)width / height;
+
+        float view[16] =
+        {
+            1 / aspect_ratio, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+        };
+        glUniformMatrix4fv(view_location, 1, GL_TRUE, view);
 
         glClear(GL_COLOR_BUFFER_BIT);
 
         glUseProgram(program);
         glBindVertexArray(vao);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 8);
 
         SDL_GL_SwapWindow(window);
     }

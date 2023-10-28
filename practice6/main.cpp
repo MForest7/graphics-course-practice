@@ -119,13 +119,37 @@ void main()
 const char rectangle_fragment_shader_source[] =
 R"(#version 330 core
 
+uniform sampler2D render_result;
+uniform int mode;
+uniform float time;
 in vec2 texcoord;
 
 layout (location = 0) out vec4 out_color;
 
 void main()
 {
-    out_color = vec4(texcoord, 0.0, 1.0);
+    vec4 color = texture(render_result, texcoord);
+    if (mode == 1) {
+        out_color = floor(color * 4.0) / 3.0;
+    } else if (mode == 2) {
+        out_color = texture(render_result, texcoord + vec2(sin(texcoord.y * 50.0 + time) * 0.01, 0.0));
+    } else if (mode == 3) {
+        vec4 sum = vec4(0.0);
+        float sum_w = 0.0;
+        const int N = 7;
+        float radius = 5.0;
+        for (int x = -N; x <= N; ++x) {
+            for (int y = -N; y <= N; ++y) {
+                float c = exp(-float(x*x + y*y) / (radius*radius));
+                sum += c * texture(render_result, texcoord +
+                vec2(x,y) / vec2(textureSize(render_result, 0)));
+                sum_w += c;
+            }
+        }
+        out_color = sum / sum.w;
+    } else {
+        out_color = color;
+    }
 }
 )";
 
@@ -247,6 +271,31 @@ int main() try
     GLuint rectangle_vao;
     glGenVertexArrays(1, &rectangle_vao);
 
+    GLuint texture;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width / 2, height / 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    GLuint rbo;
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width / 2, height / 2);
+
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    glFramebufferTexture(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0);
+    glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbo);
+    assert(glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+    GLuint render_result_location = glGetUniformLocation(rectangle_program, "render_result");
+    glUniform1i(render_result_location, 0);
+
+    GLuint mode_location = glGetUniformLocation(rectangle_program, "mode");
+    GLuint time_location = glGetUniformLocation(rectangle_program, "time");
+
     auto last_frame_start = std::chrono::high_resolution_clock::now();
 
     float time = 0.f;
@@ -271,7 +320,11 @@ int main() try
             case SDL_WINDOWEVENT_RESIZED:
                 width = event.window.data1;
                 height = event.window.data2;
-                glViewport(0, 0, width, height);
+                glViewport(0, 0, width / 2, height / 2);
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width / 2, height / 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width / 2, height / 2);
                 break;
             }
             break;
@@ -301,40 +354,83 @@ int main() try
         if (button_down[SDLK_RIGHT])
             model_angle += 2.f * dt;
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
+        float center_x[4] = { -0.5f, -0.5f, 0.5f, 0.5f };
+        float center_y[4] = { -0.5f, 0.5f, -0.5f, 0.5f };
+        float clear_r[4] = { 0.8f, 1.f, 0.f, 0.f };
+        float clear_g[4] = { 0.8f, 0.f, 1.f, 0.f };
+        float clear_b[4] = { 1.f, 0.f, 0.f, 1.f };
+        float clear_a[4] = { 1.f, 1.f, 1.f, 1.f };
 
         float near = 0.1f;
         float far = 100.f;
+        float aspect_ratio = (1.f * width) / height;
+        
+        glm::mat4 from_projection[4] = {
+            glm::perspective(glm::pi<float>() / 2.f, aspect_ratio, near, far),
+            glm::ortho(-aspect_ratio, aspect_ratio, -1.f, 1.f),
+            glm::ortho(-aspect_ratio, aspect_ratio, -1.f, 1.f),
+            glm::ortho(-aspect_ratio, aspect_ratio, -1.f, 1.f)
+        };
 
-        glm::mat4 model(1.f);
-        model = glm::rotate(model, model_angle, {0.f, 1.f, 0.f});
-        model = glm::scale(model, glm::vec3(model_scale));
+        glm::mat4 from_view[4] = {
+            glm::mat4(1),
+            glm::mat4(1),
+            glm::rotate(glm::mat4(1), glm::pi<float>() / 2, {1.f, 0.f, 0.f}),
+            glm::rotate(glm::mat4(1), glm::pi<float>() / 2, {0.f, 1.f, 0.f})
+        };
 
-        glm::mat4 view(1.f);
-        view = glm::translate(view, {0.f, 0.f, -camera_distance});
-        view = glm::rotate(view, view_angle, {1.f, 0.f, 0.f});
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glViewport(0, 0, width, height);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glm::mat4 projection = glm::perspective(glm::pi<float>() / 2.f, (1.f * width) / height, near, far);
+        for (int i = 0; i < 4; i++) {
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+            glViewport(0, 0, width / 2, height / 2);
+            glClearColor(clear_r[i], clear_g[i], clear_b[i], clear_a[i]);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_CULL_FACE);
 
-        glm::vec3 camera_position = (glm::inverse(view) * glm::vec4(0.f, 0.f, 0.f, 1.f)).xyz();
 
-        glUseProgram(dragon_program);
-        glUniformMatrix4fv(model_location, 1, GL_FALSE, reinterpret_cast<float *>(&model));
-        glUniformMatrix4fv(view_location, 1, GL_FALSE, reinterpret_cast<float *>(&view));
-        glUniformMatrix4fv(projection_location, 1, GL_FALSE, reinterpret_cast<float *>(&projection));
+            glm::mat4 model(1.f);
+            model = glm::rotate(model, model_angle, {0.f, 1.f, 0.f});
+            model = glm::scale(model, glm::vec3(model_scale));
 
-        glUniform3fv(camera_position_location, 1, (float*)(&camera_position));
+            glm::mat4 view(1.f);
+            if (i == 0) view = glm::translate(view, {0.f, 0.f, -camera_distance});
+            view *= from_view[i];
+            view = glm::rotate(view, view_angle, {1.f, 0.f, 0.f});
+            view = glm::rotate(view, view_angle, {1.f, 0.f, 0.f});
 
-        glBindVertexArray(dragon_vao);
-        glDrawElements(GL_TRIANGLES, dragon.indices.size(), GL_UNSIGNED_INT, nullptr);
+            glm::mat4 projection = glm::translate(from_projection[i], {0.f, 0.f, -0.5f});
 
-        glUseProgram(rectangle_program);
-        glUniform2f(center_location, -0.5f, -0.5f);
-        glUniform2f(size_location, 0.5f, 0.5f);
-        glBindVertexArray(rectangle_vao);
-//        glDrawArrays(GL_TRIANGLES, 0, 6);
+            glm::vec3 camera_position = (glm::inverse(view) * glm::vec4(0.f, 0.f, 0.f, 1.f)).xyz();
+
+            glUseProgram(dragon_program);
+            glUniformMatrix4fv(model_location, 1, GL_FALSE, reinterpret_cast<float *>(&model));
+            glUniformMatrix4fv(view_location, 1, GL_FALSE, reinterpret_cast<float *>(&view));
+            glUniformMatrix4fv(projection_location, 1, GL_FALSE, reinterpret_cast<float *>(&projection));
+
+            glUniform3fv(camera_position_location, 1, (float*)(&camera_position));
+
+            glBindVertexArray(dragon_vao);
+            glDrawElements(GL_TRIANGLES, dragon.indices.size(), GL_UNSIGNED_INT, nullptr);
+
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+            glViewport(0, 0, width, height);
+
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, texture);
+        
+            glUseProgram(rectangle_program);
+            glUniform1f(time_location, time);
+            glUniform1i(mode_location, i);
+            glUniform2f(center_location, center_x[i], center_y[i]);
+            glUniform2f(size_location, 0.5f, 0.5f);
+            glBindVertexArray(rectangle_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
 
         SDL_GL_SwapWindow(window);
     }

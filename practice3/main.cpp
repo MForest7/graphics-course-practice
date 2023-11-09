@@ -58,6 +58,44 @@ void main()
 }
 )";
 
+const char bezier_vertex_shader_source[] =
+R"(#version 330 core
+
+uniform mat4 view;
+
+layout (location = 0) in vec2 in_position;
+layout (location = 1) in vec4 in_color;
+layout (location = 2) in float in_distance;
+
+out vec4 color;
+out float distance;
+
+void main()
+{
+    gl_Position = view * vec4(in_position, 0.0, 1.0);
+    color = in_color;
+    distance = in_distance;
+}
+)";
+
+const char bezier_fragment_shader_source[] =
+R"(#version 330 core
+
+uniform float time;
+
+in vec4 color;
+in float distance;
+
+layout (location = 0) out vec4 out_color;
+
+void main()
+{
+    if (mod(distance + time, 40.0) > 20.0)
+        discard;
+    out_color = color;
+}
+)";
+
 GLuint create_shader(GLenum type, const char * source)
 {
     GLuint result = glCreateShader(type);
@@ -109,6 +147,12 @@ struct vertex
     std::uint8_t color[4];
 };
 
+struct bezier_vertex {
+    vec2 position;
+    std::uint8_t color[4];
+    float distance;
+};
+
 vec2 bezier(std::vector<vertex> const & vertices, float t)
 {
     std::vector<vec2> points(vertices.size());
@@ -124,6 +168,33 @@ vec2 bezier(std::vector<vertex> const & vertices, float t)
         }
     }
     return points[0];
+}
+
+void update_bezier(const std::vector<vertex>& vertices, int quality, GLuint bezier_vertex_buffer, std::vector<bezier_vertex>* bezier_vertices) {
+    if (vertices.empty()) {
+        bezier_vertices->clear();
+        glBindBuffer(GL_ARRAY_BUFFER, bezier_vertex_buffer);
+        glBufferData(GL_ARRAY_BUFFER, 0, bezier_vertices->data(), GL_DYNAMIC_DRAW);
+        return;
+    }
+
+    bezier_vertices->resize(1 + vertices.size() * quality);
+    for (int i = 0; i <= vertices.size() * quality; i++) {
+        (*bezier_vertices)[i] = bezier_vertex{
+            .position = bezier(vertices, (float)i / (vertices.size() * quality)),
+            .color = { 255, 0, 0, 0 },
+            .distance = 0
+        };
+        if (i > 0) {
+            bezier_vertices->at(i).distance = bezier_vertices->at(i - 1).distance + std::hypot(
+                bezier_vertices->at(i).position.x - bezier_vertices->at(i - 1).position.x,
+                bezier_vertices->at(i).position.y - bezier_vertices->at(i - 1).position.y
+            );
+        }
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, bezier_vertex_buffer);
+    glBufferData(GL_ARRAY_BUFFER, bezier_vertices->size() * sizeof(bezier_vertex), bezier_vertices->data(), GL_DYNAMIC_DRAW);
 }
 
 int main() try
@@ -168,7 +239,51 @@ int main() try
     auto fragment_shader = create_shader(GL_FRAGMENT_SHADER, fragment_shader_source);
     auto program = create_program(vertex_shader, fragment_shader);
 
+    auto bezier_vertex_shader = create_shader(GL_VERTEX_SHADER, bezier_vertex_shader_source);
+    auto bezier_fragment_shader = create_shader(GL_FRAGMENT_SHADER, bezier_fragment_shader_source);
+    auto bezier_program = create_program(bezier_vertex_shader, bezier_fragment_shader);
+
+    GLuint vertex_buffer;
+    glGenBuffers(1, &vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+
+    GLuint vertex_array;
+    glGenVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+
+    glEnableVertexArrayAttrib(vertex_array, 0);
+    glEnableVertexArrayAttrib(vertex_array, 1);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(vertex), (void*)0);
+    glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(vertex), (void*)(sizeof(vec2)));
+
+    GLuint bezier_vertex_buffer;
+    glGenBuffers(1, &bezier_vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, bezier_vertex_buffer);
+
+    GLuint bezier_vertex_array;
+    glGenVertexArrays(1, &bezier_vertex_array);
+    glBindVertexArray(bezier_vertex_array);
+
+    glEnableVertexArrayAttrib(bezier_vertex_array, 0);
+    glEnableVertexArrayAttrib(bezier_vertex_array, 1);
+    glEnableVertexArrayAttrib(bezier_vertex_array, 2);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(bezier_vertex), (void*)0);
+    glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(bezier_vertex), (void*)(8));
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(bezier_vertex), (void*)(12));
+
+    glLineWidth(5.f);
+    glPointSize(10.f);
+
+    std::vector<vertex> vertices;
+    std::vector<bezier_vertex> bezier_vertices;
+
+    int quality = 4;
+
     GLuint view_location = glGetUniformLocation(program, "view");
+    GLuint bezier_view_location = glGetUniformLocation(bezier_program, "view");
+    GLuint bezier_time_location = glGetUniformLocation(bezier_program, "time");
 
     auto last_frame_start = std::chrono::high_resolution_clock::now();
 
@@ -196,20 +311,38 @@ int main() try
             {
                 int mouse_x = event.button.x;
                 int mouse_y = event.button.y;
+                vertices.push_back(vertex{
+                    .position = vec2{ .x = mouse_x, .y = mouse_y },
+                    .color = { 255 * (rand() % 3 != 0), 255 * (rand() % 3 != 0), 255 * (rand() % 3 != 0), 0 }
+                });
+
+                glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+                glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(vertex), vertices.data(), GL_DYNAMIC_DRAW);
+
+                update_bezier(vertices, quality, bezier_vertex_buffer, &bezier_vertices);
             }
             else if (event.button.button == SDL_BUTTON_RIGHT)
             {
+                if (!vertices.empty()) {
+                    vertices.pop_back();
+                    
+                    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+                    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(vertex), vertices.data(), GL_DYNAMIC_DRAW);
 
+                    update_bezier(vertices, quality, bezier_vertex_buffer, &bezier_vertices);
+                }
             }
             break;
         case SDL_KEYDOWN:
             if (event.key.keysym.sym == SDLK_LEFT)
             {
-
+                quality = std::max(1, quality - 1);
+                update_bezier(vertices, quality, bezier_vertex_buffer, &bezier_vertices);
             }
             else if (event.key.keysym.sym == SDLK_RIGHT)
             {
-
+                quality = quality + 1;
+                update_bezier(vertices, quality, bezier_vertex_buffer, &bezier_vertices);
             }
             break;
         }
@@ -226,14 +359,24 @@ int main() try
 
         float view[16] =
         {
-            1.f, 0.f, 0.f, 0.f,
-            0.f, 1.f, 0.f, 0.f,
+            2.f / width, 0.f, 0.f, -1.f,
+            0.f, -2.f / height, 0.f, 1.f,
             0.f, 0.f, 1.f, 0.f,
             0.f, 0.f, 0.f, 1.f,
         };
 
         glUseProgram(program);
         glUniformMatrix4fv(view_location, 1, GL_TRUE, view);
+
+        glBindVertexArray(vertex_array);
+        glDrawArrays(GL_LINE_STRIP, 0, vertices.size());
+        glDrawArrays(GL_POINTS, 0, vertices.size());
+
+        glUseProgram(bezier_program);
+        glUniformMatrix4fv(bezier_view_location, 1, GL_TRUE, view);
+        glUniform1f(bezier_time_location, - 25 * time);
+        glBindVertexArray(bezier_vertex_array);
+        glDrawArrays(GL_LINE_STRIP, 0, bezier_vertices.size());
 
         SDL_GL_SwapWindow(window);
     }
